@@ -1,45 +1,75 @@
-# [Project name]
+# T-one Streaming ASR Service
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A low-latency Russian speech-to-text WebSocket service powered by the [t-tech/T-one](https://huggingface.co/t-tech/T-one) model via ONNX Runtime.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- **ASR Service** — workflow `ASR Service (T-one)` runs on port 8000
+  - Start command: `bash artifacts/asr-service/start.sh`
+  - Health check: `curl http://localhost:8000/health`
+  - API info: `curl http://localhost:8000/info`
+- `pnpm --filter @workspace/api-server run dev` — run the Node.js API server (port 5000, if needed)
+- `pnpm run typecheck` — full typecheck across all Node.js packages
+- `pnpm run build` — typecheck + build all Node.js packages
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- **ASR service**: Python 3.11, FastAPI, Uvicorn, ONNX Runtime (CPU), NumPy, librosa
+- **Model**: t-tech/T-one — stateful streaming Conformer-CTC, Russian ASR, ONNX format
+- **Node API server**: Express 5, TypeScript, Drizzle ORM (available but unused by default)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/asr-service/main.py` — FastAPI app + WebSocket handler
+- `artifacts/asr-service/model.py` — ONNX model loader, streaming session, CTC decode
+- `artifacts/asr-service/start.sh` — service entrypoint
+- `artifacts/asr-service/test_client.py` — WebSocket test client
 
-## Architecture decisions
+## WebSocket Protocol
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+Connect to `ws://localhost:8000/ws/transcribe`
 
-## Product
+| Step | Direction | Payload |
+|------|-----------|---------|
+| 1 | → | `{"type":"config","sample_rate":16000}` |
+| 2 | ← | `{"type":"ack","message":"…"}` |
+| 3 | → | Binary: raw PCM **float32** mono 16 kHz (any chunk size) |
+| 4 | ← | `{"type":"partial","text":"…","is_final":false}` *(periodic)* |
+| 5 | → | `{"type":"end"}` |
+| 6 | ← | `{"type":"final","text":"…","is_final":true}` |
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+**Audio format**: PCM float32 in [-1, 1] **or** int16. The model internally segments into 2400-sample (150 ms) chunks and threads stateful attention context between them for streaming accuracy.
 
-## User preferences
+## Model Architecture
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Input: `signal [batch, 2400, 1]` — raw int32 PCM, 150 ms chunks
+- Output: `logprobs [batch, 10, 35]` — CTC log-probs, 35-class Russian vocab
+- State: `[batch, 219729]` float16 — attention carry-over between chunks
+- Decode: greedy CTC over the concatenated logprobs of all chunks
+
+## Testing
+
+```bash
+# Connectivity test (no audio file needed)
+python3 artifacts/asr-service/test_client.py
+
+# Transcribe a WAV file
+python3 artifacts/asr-service/test_client.py path/to/audio.wav
+```
+
+## Architecture Decisions
+
+- **ONNX over native transformers**: T-one uses a custom `ToneForCTC` architecture not registered in HuggingFace transformers. The repo ships `model.onnx` which runs without any custom Python class.
+- **Stateful per-connection sessions**: The model carries `state` / `state_next` tensors between 150 ms chunks, giving it full utterance context despite streaming chunk-by-chunk.
+- **CPU-only PyTorch + onnxruntime**: GPU CUDA builds exceed the disk quota; CPU inference is sufficient for this model size.
+- **Greedy CTC decode**: A KenLM language model binary (`kenlm.bin`) is included in the HF repo and could be used for beam-search rescoring to improve accuracy — not yet integrated.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- The model expects raw PCM int32 internally; the `model.py` converts float32 → int32 automatically.
+- NumPy must be pinned to `<2` due to a binary compatibility issue with torch 2.2.2.
+- Always resample audio to 16 kHz before sending (or pass the correct `sample_rate` in the config message).
 
-## Pointers
+## User Preferences
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+_Populate as you build._
