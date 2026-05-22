@@ -121,13 +121,28 @@ async def websocket_transcribe(websocket: WebSocket):
                 if msg_type == "config":
                     sr = int(msg.get("sample_rate", 16000))
                     reference = str(msg.get("reference", ""))
-                    session.configure(sr, reference=reference)
+                    preprocessing = msg.get("preprocessing")  # optional dict
+                    session.configure(sr, reference=reference, preprocessing=preprocessing)
+
+                    from preprocessing import PreprocessorConfig
+                    active_cfg = session.preprocessor.config
                     await websocket.send_json({
                         "type": "ack",
                         "message": f"Config accepted — sample_rate={sr}"
                                    + (", reference set" if reference else ""),
+                        "preprocessing": {
+                            "dc_removal":    active_cfg.dc_removal,
+                            "pre_emphasis":  active_cfg.pre_emphasis,
+                            "normalize":     active_cfg.normalize,
+                            "vad_enabled":   active_cfg.vad_enabled,
+                            "vad_aggressiveness": active_cfg.vad_aggressiveness,
+                            "denoise":       active_cfg.denoise,
+                        },
                     })
-                    logger.info(f"Config: sample_rate={sr}, reference={'set' if reference else 'none'}")
+                    logger.info(
+                        f"Config: sample_rate={sr}, reference={'set' if reference else 'none'}, "
+                        f"preprocessing={preprocessing or 'defaults'}"
+                    )
 
                 elif msg_type == "end":
                     logger.info("End-of-stream — flushing remaining audio")
@@ -162,7 +177,7 @@ async def websocket_transcribe(websocket: WebSocket):
             # ── Binary (audio) frames ───────────────────────────────────
             elif "bytes" in data:
                 raw = data["bytes"]
-                partial = await loop.run_in_executor(None, session.push, raw)
+                partial, prep_info = await loop.run_in_executor(None, session.push, raw)
                 chunk_count += 1
 
                 if partial and chunk_count % PARTIAL_EMIT_CHUNKS == 0:
@@ -170,8 +185,9 @@ async def websocket_transcribe(websocket: WebSocket):
                         "type": "partial",
                         "text": partial,
                         "is_final": False,
+                        "speech_fraction": prep_info.get("speech_fraction"),
                     })
-                    logger.debug(f"Partial: {partial!r}")
+                    logger.debug(f"Partial: {partial!r} (speech={prep_info.get('speech_fraction')})")
 
     except WebSocketDisconnect:
         from metrics import global_metrics

@@ -1,6 +1,7 @@
 import logging
 import time
 import numpy as np
+from preprocessing import AudioPreprocessor, PreprocessorConfig
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,12 @@ class ASRModel:
     # Full-utterance transcription
     # ------------------------------------------------------------------
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = SAMPLE_RATE,
+        preprocessor: AudioPreprocessor | None = None,
+    ) -> str:
         if len(audio) == 0:
             return ""
 
@@ -180,6 +186,10 @@ class ASRModel:
                 audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=SAMPLE_RATE)
             except ImportError:
                 logger.warning("librosa unavailable — skipping resample")
+
+        if preprocessor is not None:
+            audio, info = preprocessor.process_utterance(audio)
+            logger.debug(f"Utterance preprocessing: {info}")
 
         chunks = self._prepare_chunks(audio)
         state = self._zero_state()
@@ -224,26 +234,41 @@ class StreamingSession:
         self._all_logprobs: list[np.ndarray] = []
         self.metrics = SessionMetrics()
         self.metrics.start()
+        self.preprocessor = AudioPreprocessor(sample_rate=SAMPLE_RATE)
 
-    def configure(self, sample_rate: int, reference: str = "") -> None:
+    def configure(
+        self,
+        sample_rate: int,
+        reference: str = "",
+        preprocessing: dict | None = None,
+    ) -> None:
         self._sample_rate = sample_rate
         self._reference = reference
         self.metrics.sample_rate = sample_rate
+        if preprocessing is not None:
+            cfg = PreprocessorConfig.from_dict(preprocessing)
+        else:
+            cfg = PreprocessorConfig()
+        self.preprocessor.configure(cfg, sample_rate)
 
-    def push(self, audio_bytes: bytes) -> str | None:
+    def push(self, audio_bytes: bytes) -> tuple[str | None, dict]:
         """
         Accept raw audio bytes (float32 or int16 PCM).
-        Processes complete 2400-sample chunks and returns a partial
-        transcript string if the new chunks produced non-empty output.
-        Timing and audio-sample counts are recorded into self.metrics.
+        Applies the preprocessing pipeline, then processes complete
+        2400-sample chunks through the ONNX model.
+
+        Returns (partial_text | None, preprocessing_info).
+          partial_text     — non-empty decoded text if any chunks produced output
+          preprocessing_info — dict with 'speech_fraction', 'is_silent', 'steps_applied'
         """
         self.metrics.record_first_audio()
 
         try:
-            audio_f32 = np.frombuffer(audio_bytes, dtype=np.float32)
+            audio_f32 = np.frombuffer(audio_bytes, dtype=np.float32).copy()
         except ValueError:
             audio_f32 = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
 
+        # Resample before preprocessing so VAD etc. always sees 16 kHz
         if self._sample_rate != SAMPLE_RATE:
             try:
                 import librosa
@@ -253,8 +278,12 @@ class StreamingSession:
             except ImportError:
                 pass
 
+        # Normalise int16-range input to [-1, 1] before preprocessing
         if len(audio_f32) > 0 and np.abs(audio_f32).max() > 1.0:
             audio_f32 = audio_f32 / 32768.0
+
+        # ── Preprocessing ────────────────────────────────────────────
+        audio_f32, prep_info = self.preprocessor.process_chunk(audio_f32)
 
         self.metrics.record_audio_samples(len(audio_f32))
 
@@ -271,13 +300,13 @@ class StreamingSession:
             self._all_logprobs.append(lp)
 
         if not chunk_logprobs:
-            return None
+            return None, prep_info
 
         partial_text = _ctc_decode(np.concatenate(chunk_logprobs, axis=0))
         if partial_text.strip():
             self.metrics.record_first_partial()
-            return partial_text
-        return None
+            return partial_text, prep_info
+        return None, prep_info
 
     def flush(self) -> str:
         """
