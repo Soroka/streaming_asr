@@ -1,0 +1,2 @@
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+tone 0.1.0 requires huggingface-hub<1.0.0,>=0.14.0, but you have huggingface-hub 1.16.1 which is incompatible.

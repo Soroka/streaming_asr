@@ -2,10 +2,29 @@
 set -e
 cd "$(dirname "$0")"
 
-# ── Auto-install GPU runtime when CUDA is present ────────────────────────────
+# ── Install the tone package from GitHub if not present ──────────────────────
+# tone is not on PyPI; install directly from the Git repo.
+# We check first to avoid re-installing on every restart.
+if ! python3 -c "import tone" 2>/dev/null; then
+    echo "[start.sh] Installing tone package from GitHub …"
+    python3 -m pip install --quiet --no-cache-dir \
+        "git+https://github.com/voicekit-team/T-one.git" \
+        2>&1 | tail -5 \
+    || {
+        echo "[start.sh] GitHub install failed — trying local clone …"
+        if [ -d /tmp/tone_repo ]; then
+            python3 -m pip install --quiet --no-cache-dir /tmp/tone_repo --no-deps
+        else
+            git clone --depth 1 https://github.com/voicekit-team/T-one.git /tmp/tone_repo
+            python3 -m pip install --quiet --no-cache-dir /tmp/tone_repo --no-deps
+        fi
+    }
+    echo "[start.sh] tone package installed"
+fi
+
+# ── Auto-upgrade to GPU runtime when CUDA is present ─────────────────────────
 if python3 - <<'EOF'
 import subprocess, sys
-# Check if a CUDA device is actually visible
 try:
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -18,10 +37,10 @@ except Exception:
 sys.exit(1)  # no CUDA
 EOF
 then
-    echo "[start.sh] CUDA GPU detected — ensuring onnxruntime-gpu is installed"
+    echo "[start.sh] CUDA GPU detected — installing GPU-accelerated torch + torchaudio"
     python3 -m pip install --quiet --no-cache-dir \
-        "torch==2.2.2" --index-url https://download.pytorch.org/whl/cu121 \
-        onnxruntime-gpu \
+        "torch==2.2.2" "torchaudio==2.2.2" \
+        --index-url https://download.pytorch.org/whl/cu121 \
         2>&1 | tail -5
     echo "[start.sh] GPU packages ready"
 else

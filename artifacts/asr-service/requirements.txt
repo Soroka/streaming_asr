@@ -5,9 +5,17 @@ numpy==1.26.4
 # PyTorch CPU-only build (avoids pulling in CUDA drivers/libs)
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2+cpu
+torchaudio==2.2.2+cpu
 
-# ONNX Runtime (CPU)
+# HuggingFace transformers (4.x required — 5.x needs torch >= 2.4)
+transformers>=4.30.0,<5.0.0
+
+# tone package — streaming CTC pipeline (install from GitHub or local clone)
+# tone package includes: onnxruntime (ONNX backend, imported at module level),
+#                        pyctcdecode, kenlm (beam-search CTC decoder)
 onnxruntime==1.26.0
+pyctcdecode>=0.2.0,<1.0.0
+kenlm>=0.2.0,<1.0.0
 
 # Web framework
 fastapi==0.136.1
