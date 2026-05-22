@@ -31,3 +31,7 @@ noisereduce==3.0.3
 
 # Test client
 websockets==16.0
+
+# Benchmark script (benchmark.py)
+datasets==4.8.5
+tqdm==4.67.3
