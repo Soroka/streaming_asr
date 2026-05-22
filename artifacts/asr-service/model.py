@@ -23,6 +23,37 @@ FRAMES_PER_CHUNK = 10      # CTC frames emitted per chunk
 STATE_SIZE = 219729        # Stateful attention state vector length
 
 
+def _detect_providers() -> list[str]:
+    """
+    Return the best available ONNX Runtime execution providers in priority order.
+    Prefers CUDA when a GPU is present, falls back to CPU.
+    """
+    import onnxruntime as ort
+    available = ort.get_available_providers()
+    logger.info(f"ORT available providers: {available}")
+
+    providers = []
+    if "CUDAExecutionProvider" in available:
+        providers.append(
+            (
+                "CUDAExecutionProvider",
+                {
+                    "device_id": 0,
+                    "arena_extend_strategy": "kNextPowerOfTwo",
+                    "gpu_mem_limit": 4 * 1024 * 1024 * 1024,  # 4 GB cap
+                    "cudnn_conv_algo_search": "EXHAUSTIVE",
+                    "do_copy_in_default_stream": True,
+                },
+            )
+        )
+        logger.info("CUDA GPU detected — using CUDAExecutionProvider")
+    else:
+        logger.info("No CUDA GPU — using CPUExecutionProvider")
+
+    providers.append("CPUExecutionProvider")
+    return providers
+
+
 def _to_int32_pcm(audio_f32: np.ndarray) -> np.ndarray:
     """Convert float32 [-1,1] audio to int32 PCM in [-32767, 32767]."""
     return (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int32)
@@ -51,6 +82,9 @@ class ASRModel:
         input  'state'      [batch, 219729]       float16 — attention state
         output 'logprobs'   [batch, 10, 35]       float   — CTC log-probs
         output 'state_next' [batch, 219729]       float16 — updated state
+
+    Automatically uses CUDAExecutionProvider when a GPU is available,
+    and falls back to CPUExecutionProvider otherwise.
     """
 
     def __init__(self):
@@ -61,15 +95,21 @@ class ASRModel:
         model_path = hf_hub_download(MODEL_ID, "model.onnx")
         logger.info(f"Model cached at {model_path}")
 
+        providers = _detect_providers()
+
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 4
         opts.intra_op_num_threads = 4
+
         self.session = ort.InferenceSession(
             model_path,
             sess_options=opts,
-            providers=["CPUExecutionProvider"],
+            providers=providers,
         )
-        logger.info("ONNX session ready — stateful streaming model")
+
+        active = self.session.get_providers()
+        self.device = "cuda" if "CUDAExecutionProvider" in active else "cpu"
+        logger.info(f"ONNX session ready — active providers: {active} | device={self.device}")
 
     # ------------------------------------------------------------------
     # Low-level: single chunk inference
@@ -99,14 +139,12 @@ class ASRModel:
     @staticmethod
     def _prepare_chunks(audio_f32: np.ndarray) -> list[np.ndarray]:
         """
-        Normalize, pad to multiple of CHUNK_SAMPLES, split into chunks.
+        Normalize, pad to a multiple of CHUNK_SAMPLES, split into chunks.
         Returns list of int32 arrays each shaped [1, CHUNK_SAMPLES, 1].
         """
-        # Normalise int16-range PCM to [-1, 1] if needed
         if np.abs(audio_f32).max() > 1.0:
             audio_f32 = audio_f32 / 32768.0
 
-        # Pad to multiple of CHUNK_SAMPLES
         remainder = len(audio_f32) % CHUNK_SAMPLES
         if remainder:
             audio_f32 = np.concatenate(
@@ -121,7 +159,7 @@ class ASRModel:
         return chunks
 
     # ------------------------------------------------------------------
-    # Full-utterance transcription (sequential with state threading)
+    # Full-utterance transcription
     # ------------------------------------------------------------------
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
@@ -149,7 +187,7 @@ class ASRModel:
         return _ctc_decode(logprobs)
 
     # ------------------------------------------------------------------
-    # Streaming session (used by the WebSocket handler)
+    # Streaming session factory
     # ------------------------------------------------------------------
 
     def new_session(self) -> "StreamingSession":
@@ -158,12 +196,12 @@ class ASRModel:
 
 class StreamingSession:
     """
-    Manages per-connection streaming state.
+    Per-connection streaming state.
 
     Usage:
         session = model.new_session()
         for raw_bytes in audio_chunks:
-            partial = session.push(raw_bytes, sample_rate)
+            partial = session.push(raw_bytes)
             if partial:
                 send_to_client(partial)
         final = session.flush()
@@ -183,16 +221,13 @@ class StreamingSession:
         """
         Accept raw audio bytes (float32 or int16 PCM).
         Processes complete 2400-sample chunks and returns a partial
-        transcript string if any new complete words are emitted,
-        or None if nothing new.
+        transcript string if the new chunks produced any output, else None.
         """
-        # Try float32 first, fall back to int16
         try:
             audio_f32 = np.frombuffer(audio_bytes, dtype=np.float32)
         except ValueError:
             audio_f32 = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
 
-        # Resample if needed
         if self._sample_rate != SAMPLE_RATE:
             try:
                 import librosa
@@ -202,14 +237,12 @@ class StreamingSession:
             except ImportError:
                 pass
 
-        # Normalise
         if len(audio_f32) > 0 and np.abs(audio_f32).max() > 1.0:
             audio_f32 = audio_f32 / 32768.0
 
         new_pcm = _to_int32_pcm(audio_f32)
         self._pcm_buffer = np.concatenate([self._pcm_buffer, new_pcm])
 
-        # Process all complete chunks
         chunk_logprobs = []
         while len(self._pcm_buffer) >= CHUNK_SAMPLES:
             chunk = self._pcm_buffer[:CHUNK_SAMPLES].reshape(1, CHUNK_SAMPLES, 1)
@@ -226,8 +259,8 @@ class StreamingSession:
 
     def flush(self) -> str:
         """
-        Process any remaining buffered audio and return the full transcript
-        decoded from all chunks seen in this session.
+        Process remaining buffered audio and return the full transcript
+        decoded from all chunks in this session.
         """
         if len(self._pcm_buffer) > 0:
             pad = CHUNK_SAMPLES - len(self._pcm_buffer)

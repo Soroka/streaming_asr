@@ -44,6 +44,7 @@ async def info():
     return {
         "model": "t-tech/T-one",
         "description": "Russian streaming ASR — stateful Conformer CTC via ONNX",
+        "device": asr_model.device if asr_model else "not loaded",
         "websocket_endpoint": "/ws/transcribe",
         "protocol": {
             "step_1_connect": "ws://<host>/ws/transcribe",
