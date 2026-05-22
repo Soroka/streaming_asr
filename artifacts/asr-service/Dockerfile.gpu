@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# T-one Streaming ASR Service — GPU image (CUDA 12.1)
+# ─────────────────────────────────────────────────────────────────────────────
+# Prerequisites on the host:
+#   • NVIDIA driver ≥ 530 (CUDA 12.1 compatible)
+#   • NVIDIA Container Toolkit: https://docs.nvidia.com/datacenter/cloud-native/
+#
+# Usage:
+#   docker build -f Dockerfile.gpu -t t-one-asr-gpu .
+#   docker run --gpus all -p 8000:8000 -v t-one-model-cache:/cache t-one-asr-gpu
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: builder ─────────────────────────────────────────────────────────
+FROM python:3.11-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        g++ \
+        python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN pip install --upgrade pip wheel
+
+COPY requirements-gpu.txt .
+
+RUN pip install --prefix=/install --no-cache-dir -r requirements-gpu.txt
+
+
+# ── Stage 2: runtime (CUDA 12.1 + cuDNN 8) ───────────────────────────────────
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-debian12 AS runtime
+
+LABEL org.opencontainers.image.title="T-one Streaming ASR (GPU / CUDA 12.1)"
+LABEL org.opencontainers.image.description="Low-latency Russian speech-to-text via ONNX Runtime + CUDAExecutionProvider"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-distutils \
+        libpython3.11 \
+        libsndfile1 \
+        libgomp1 \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3 / pip point to 3.11
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+    && ln -sf /usr/local/bin/python3 /usr/local/bin/python
+
+# Copy the installed Python packages from the builder (which used the official
+# python:3.11 image — same interpreter ABI as python3.11 on Debian Bookworm)
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
+
+COPY main.py model.py preprocessing.py metrics.py test_client.py ./
+
+ENV HF_HOME=/cache/huggingface
+ENV TRANSFORMERS_CACHE=/cache/huggingface
+RUN mkdir -p /cache/huggingface
+
+ENV HF_TOKEN=""
+
+RUN useradd -m -u 1000 asr \
+    && chown -R asr:asr /app /cache
+USER asr
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
+    CMD curl -sf http://localhost:8000/health || exit 1
+
+CMD ["python3", "-m", "uvicorn", "main:app", \
+     "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

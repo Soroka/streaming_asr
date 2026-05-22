@@ -22,8 +22,46 @@ A low-latency Russian speech-to-text WebSocket service powered by the [t-tech/T-
 
 - `artifacts/asr-service/main.py` — FastAPI app + WebSocket handler
 - `artifacts/asr-service/model.py` — ONNX model loader, streaming session, CTC decode
-- `artifacts/asr-service/start.sh` — service entrypoint
+- `artifacts/asr-service/preprocessing.py` — audio pipeline (DC removal, pre-emphasis, normalise, VAD, denoise)
+- `artifacts/asr-service/metrics.py` — per-session and global aggregate metrics
+- `artifacts/asr-service/start.sh` — service entrypoint (CUDA auto-detect)
 - `artifacts/asr-service/test_client.py` — WebSocket test client
+- `artifacts/asr-service/Dockerfile` — CPU production image (two-stage build)
+- `artifacts/asr-service/Dockerfile.gpu` — GPU image (CUDA 12.1 + cuDNN 8)
+- `artifacts/asr-service/docker-compose.yml` — orchestrates CPU and GPU services
+- `artifacts/asr-service/requirements.txt` — pinned CPU dependencies
+- `artifacts/asr-service/requirements-gpu.txt` — pinned GPU dependencies
+
+## Docker
+
+### CPU (default)
+```bash
+cd artifacts/asr-service
+
+# Build image (~3–5 min first time; subsequent builds use layer cache)
+docker build -t t-one-asr .
+
+# Run — model is downloaded on first start and cached in the volume
+docker run -p 8000:8000 -v t-one-model-cache:/cache t-one-asr
+
+# Or use Compose
+docker compose up asr-cpu
+```
+
+### GPU (CUDA 12.1)
+Requires NVIDIA driver ≥ 530 and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/).
+```bash
+docker build -f Dockerfile.gpu -t t-one-asr-gpu .
+docker run --gpus all -p 8000:8000 -v t-one-model-cache:/cache t-one-asr-gpu
+
+# Or use Compose
+docker compose --profile gpu up asr-gpu
+```
+
+### Tips
+- Pass `HF_TOKEN=hf_xxx` as an env var to avoid HuggingFace anonymous download rate limits.
+- The named volume `t-one-model-cache` (~250 MB) persists the ONNX model between container restarts.
+- Health check: `curl http://localhost:8000/health`
 
 ## WebSocket Protocol
 

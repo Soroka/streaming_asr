@@ -1,0 +1,41 @@
+# ── Version control ───────────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Dev / test artefacts ──────────────────────────────────────────────────────
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.opus
+*.m4a
+*.log
+
+# ── Local model cache (mounted as a volume at runtime) ────────────────────────
+.cache/
+*.onnx
+*.bin
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+
+# ── Editor / OS noise ─────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db

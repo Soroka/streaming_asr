@@ -1,0 +1,34 @@
+# ── T-one ASR Service — GPU requirements (CUDA 12.1) ─────────────────────────
+# numpy MUST stay <2 — binary compatibility with torch 2.2.2
+numpy==1.26.4
+
+# PyTorch with CUDA 12.1 support
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.2.2+cu121
+
+# ONNX Runtime with CUDA 12.x support
+# (requires the NVIDIA Container Toolkit on the host)
+onnxruntime-gpu==1.18.1
+
+# Web framework
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+starlette==1.0.1
+httpx==0.28.1
+anyio==4.13.0
+python-multipart==0.0.20
+
+# Model download
+huggingface_hub==1.16.1
+
+# Audio I/O & resampling
+librosa==0.11.0
+soundfile==0.13.1
+scipy==1.17.1
+
+# Preprocessing
+webrtcvad==2.0.10
+noisereduce==3.0.3
+
+# Test client
+websockets==16.0

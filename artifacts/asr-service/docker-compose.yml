@@ -1,0 +1,85 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# T-one Streaming ASR — Docker Compose
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# CPU (default):
+#   docker compose up asr-cpu
+#
+# GPU (requires NVIDIA Container Toolkit + CUDA 12.1 driver):
+#   docker compose --profile gpu up asr-gpu
+#
+# Optionally pass a HuggingFace token to avoid download rate limits:
+#   HF_TOKEN=hf_xxx docker compose up asr-cpu
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── CPU variant ─────────────────────────────────────────────────────────────
+  asr-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: t-one-asr:cpu
+    container_name: t-one-asr-cpu
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist the ~250 MB ONNX model so it is not re-downloaded on restart
+      - model-cache:/cache
+    environment:
+      # Optional: set HF_TOKEN in your shell or a .env file to bypass HF rate limits
+      HF_TOKEN: "${HF_TOKEN:-}"
+      # Tune ORT thread count to your CPU core count
+      OMP_NUM_THREADS: "4"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ── GPU variant (CUDA 12.1) ──────────────────────────────────────────────────
+  asr-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: t-one-asr:gpu
+    container_name: t-one-asr-gpu
+    profiles:
+      - gpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - model-cache:/cache
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+      OMP_NUM_THREADS: "4"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  model-cache:
+    driver: local
