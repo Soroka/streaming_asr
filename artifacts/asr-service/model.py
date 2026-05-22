@@ -1,4 +1,5 @@
 import logging
+import time
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ FRAMES_PER_CHUNK = 10      # CTC frames emitted per chunk
 STATE_SIZE = 219729        # Stateful attention state vector length
 
 
-def _detect_providers() -> list[str]:
+def _detect_providers() -> list:
     """
     Return the best available ONNX Runtime execution providers in priority order.
     Prefers CUDA when a GPU is present, falls back to CPU.
@@ -112,22 +113,27 @@ class ASRModel:
         logger.info(f"ONNX session ready — active providers: {active} | device={self.device}")
 
     # ------------------------------------------------------------------
-    # Low-level: single chunk inference
+    # Low-level: single chunk inference (returns latency_ms too)
     # ------------------------------------------------------------------
 
     def _infer_chunk(
         self,
         chunk_int32: np.ndarray,   # [1, 2400, 1] int32
         state: np.ndarray,         # [1, STATE_SIZE] float16
-    ):
-        """Run one chunk through the model, return (logprobs, state_next)."""
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """
+        Run one chunk through the model.
+        Returns (logprobs [10,35], state_next [1,STATE_SIZE], latency_ms).
+        """
+        t0 = time.perf_counter()
         outputs = self.session.run(
             ["logprobs", "state_next"],
             {"signal": chunk_int32, "state": state},
         )
+        latency_ms = (time.perf_counter() - t0) * 1_000
         logprobs = outputs[0][0]    # [10, 35]
         state_next = outputs[1]     # [1, STATE_SIZE]
-        return logprobs, state_next
+        return logprobs, state_next, latency_ms
 
     def _zero_state(self) -> np.ndarray:
         return np.zeros((1, STATE_SIZE), dtype=np.float16)
@@ -180,10 +186,10 @@ class ASRModel:
         all_logprobs = []
 
         for chunk in chunks:
-            lp, state = self._infer_chunk(chunk, state)
+            lp, state, _ = self._infer_chunk(chunk, state)
             all_logprobs.append(lp)
 
-        logprobs = np.concatenate(all_logprobs, axis=0)  # [total_frames, 35]
+        logprobs = np.concatenate(all_logprobs, axis=0)
         return _ctc_decode(logprobs)
 
     # ------------------------------------------------------------------
@@ -196,33 +202,43 @@ class ASRModel:
 
 class StreamingSession:
     """
-    Per-connection streaming state.
+    Per-connection streaming state with built-in metrics collection.
 
     Usage:
         session = model.new_session()
+        session.configure(sample_rate=16000, reference="optional ref text")
         for raw_bytes in audio_chunks:
             partial = session.push(raw_bytes)
             if partial:
                 send_to_client(partial)
-        final = session.flush()
+        final = session.flush()   # also finalises session.metrics
     """
 
     def __init__(self, model: ASRModel):
+        from metrics import SessionMetrics
         self._model = model
         self._state = model._zero_state()
         self._sample_rate = SAMPLE_RATE
+        self._reference = ""
         self._pcm_buffer = np.array([], dtype=np.int32)
         self._all_logprobs: list[np.ndarray] = []
+        self.metrics = SessionMetrics()
+        self.metrics.start()
 
-    def configure(self, sample_rate: int):
+    def configure(self, sample_rate: int, reference: str = "") -> None:
         self._sample_rate = sample_rate
+        self._reference = reference
+        self.metrics.sample_rate = sample_rate
 
     def push(self, audio_bytes: bytes) -> str | None:
         """
         Accept raw audio bytes (float32 or int16 PCM).
         Processes complete 2400-sample chunks and returns a partial
-        transcript string if the new chunks produced any output, else None.
+        transcript string if the new chunks produced non-empty output.
+        Timing and audio-sample counts are recorded into self.metrics.
         """
+        self.metrics.record_first_audio()
+
         try:
             audio_f32 = np.frombuffer(audio_bytes, dtype=np.float32)
         except ValueError:
@@ -240,6 +256,8 @@ class StreamingSession:
         if len(audio_f32) > 0 and np.abs(audio_f32).max() > 1.0:
             audio_f32 = audio_f32 / 32768.0
 
+        self.metrics.record_audio_samples(len(audio_f32))
+
         new_pcm = _to_int32_pcm(audio_f32)
         self._pcm_buffer = np.concatenate([self._pcm_buffer, new_pcm])
 
@@ -247,7 +265,8 @@ class StreamingSession:
         while len(self._pcm_buffer) >= CHUNK_SAMPLES:
             chunk = self._pcm_buffer[:CHUNK_SAMPLES].reshape(1, CHUNK_SAMPLES, 1)
             self._pcm_buffer = self._pcm_buffer[CHUNK_SAMPLES:]
-            lp, self._state = self._model._infer_chunk(chunk, self._state)
+            lp, self._state, lat_ms = self._model._infer_chunk(chunk, self._state)
+            self.metrics.record_chunk_latency(lat_ms)
             chunk_logprobs.append(lp)
             self._all_logprobs.append(lp)
 
@@ -255,24 +274,33 @@ class StreamingSession:
             return None
 
         partial_text = _ctc_decode(np.concatenate(chunk_logprobs, axis=0))
-        return partial_text if partial_text.strip() else None
+        if partial_text.strip():
+            self.metrics.record_first_partial()
+            return partial_text
+        return None
 
     def flush(self) -> str:
         """
-        Process remaining buffered audio and return the full transcript
-        decoded from all chunks in this session.
+        Process any remaining buffered audio, decode the full utterance,
+        finalise self.metrics, and return the final transcript.
         """
+        self.metrics.record_first_audio()   # guard in case no audio was pushed
+
         if len(self._pcm_buffer) > 0:
             pad = CHUNK_SAMPLES - len(self._pcm_buffer)
             chunk = np.concatenate(
                 [self._pcm_buffer, np.zeros(pad, dtype=np.int32)]
             ).reshape(1, CHUNK_SAMPLES, 1)
-            lp, self._state = self._model._infer_chunk(chunk, self._state)
+            lp, self._state, lat_ms = self._model._infer_chunk(chunk, self._state)
+            self.metrics.record_chunk_latency(lat_ms)
             self._all_logprobs.append(lp)
             self._pcm_buffer = np.array([], dtype=np.int32)
 
         if not self._all_logprobs:
+            self.metrics.finalise("", self._reference)
             return ""
 
         all_lp = np.concatenate(self._all_logprobs, axis=0)
-        return _ctc_decode(all_lp)
+        text = _ctc_decode(all_lp)
+        self.metrics.finalise(text, self._reference)
+        return text

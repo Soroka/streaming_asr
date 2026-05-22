@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(
@@ -34,6 +34,10 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# HTTP endpoints
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "model": "t-tech/T-one"}
@@ -48,11 +52,11 @@ async def info():
         "websocket_endpoint": "/ws/transcribe",
         "protocol": {
             "step_1_connect": "ws://<host>/ws/transcribe",
-            "step_2_config":  '→ send JSON  {"type":"config","sample_rate":16000}',
+            "step_2_config":  '→ send JSON  {"type":"config","sample_rate":16000,"reference":"optional ref for WER"}',
             "step_3_stream":  "→ send binary frames: raw PCM float32 [-1,1] or int16, mono",
             "step_4_partial": '← receive   {"type":"partial","text":"…","is_final":false}',
             "step_5_end":     '→ send JSON  {"type":"end"}',
-            "step_6_final":   '← receive   {"type":"final","text":"…","is_final":true}',
+            "step_6_final":   '← receive   {"type":"final","text":"…","is_final":true,"metrics":{…}}',
         },
         "audio_format": {
             "encoding": "PCM float32 (preferred) or int16",
@@ -61,13 +65,34 @@ async def info():
             "chunk_size_samples": 2400,
             "chunk_duration_ms": 150,
         },
-        "notes": [
-            "Each 150 ms audio chunk is processed with stateful attention for low-latency streaming.",
-            "Partial results are emitted after every 2 s of buffered complete chunks.",
-            "The final result uses global CTC decoding over the full utterance for best accuracy.",
-        ],
+        "metrics_endpoint": "GET /metrics",
     }
 
+
+@app.get("/metrics")
+async def get_metrics(last_n: int = Query(default=20, ge=1, le=500)):
+    """
+    Return global aggregate metrics over all completed sessions.
+
+    Query params:
+      last_n  — number of recent sessions to include in the 'recent_sessions'
+                list (default 20, max 500).
+
+    Metrics explained:
+      chunk_latency_ms  — ONNX inference time per 150 ms audio chunk
+      ttft_ms           — time-to-first-token: ms from first audio frame to first partial result
+      e2e_latency_ms    — end-to-end: ms from first audio frame to final result
+      rtf               — real-time factor = total_inference_time / audio_duration
+                          (< 1.0 means faster than real-time)
+      wer               — word error rate (only sessions where a reference was provided)
+    """
+    from metrics import global_metrics
+    return global_metrics.snapshot(last_n=last_n)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
 
 @app.websocket("/ws/transcribe")
 async def websocket_transcribe(websocket: WebSocket):
@@ -77,7 +102,6 @@ async def websocket_transcribe(websocket: WebSocket):
     session = asr_model.new_session()
     loop = asyncio.get_event_loop()
     PARTIAL_EMIT_CHUNKS = 13   # ~2 s of audio before emitting a partial
-
     chunk_count = 0
 
     try:
@@ -96,22 +120,37 @@ async def websocket_transcribe(websocket: WebSocket):
 
                 if msg_type == "config":
                     sr = int(msg.get("sample_rate", 16000))
-                    session.configure(sr)
+                    reference = str(msg.get("reference", ""))
+                    session.configure(sr, reference=reference)
                     await websocket.send_json({
                         "type": "ack",
-                        "message": f"Config accepted — sample_rate={sr}",
+                        "message": f"Config accepted — sample_rate={sr}"
+                                   + (", reference set" if reference else ""),
                     })
-                    logger.info(f"Config: sample_rate={sr}")
+                    logger.info(f"Config: sample_rate={sr}, reference={'set' if reference else 'none'}")
 
                 elif msg_type == "end":
                     logger.info("End-of-stream — flushing remaining audio")
                     final_text = await loop.run_in_executor(None, session.flush)
+
+                    sm = session.metrics
+                    from metrics import global_metrics
+                    global_metrics.record(sm)
+
+                    session_summary = sm.summary()
+                    logger.info(
+                        f"Session {sm.session_id} done | "
+                        f"rtf={session_summary['rtf']} | "
+                        f"e2e={session_summary['e2e_latency_ms']} ms | "
+                        f"wer={session_summary['wer']}"
+                    )
+
                     await websocket.send_json({
                         "type": "final",
                         "text": final_text,
                         "is_final": True,
+                        "metrics": session_summary,
                     })
-                    logger.info(f"Final transcript: {final_text!r}")
                     break
 
                 else:
@@ -132,11 +171,15 @@ async def websocket_transcribe(websocket: WebSocket):
                         "text": partial,
                         "is_final": False,
                     })
-                    logger.debug(f"Partial transcript: {partial!r}")
+                    logger.debug(f"Partial: {partial!r}")
 
     except WebSocketDisconnect:
+        from metrics import global_metrics
+        global_metrics.record_error()
         logger.info("WebSocket disconnected")
     except Exception as exc:
+        from metrics import global_metrics
+        global_metrics.record_error()
         logger.exception(f"Unhandled WebSocket error: {exc}")
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
