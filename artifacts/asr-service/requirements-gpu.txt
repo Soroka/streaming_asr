@@ -1,16 +1,32 @@
 # ── T-one ASR Service — GPU requirements (CUDA 12.1) ─────────────────────────
-# numpy MUST stay <2 — binary compatibility with torch 2.2.2
+#
+# NOTE: the tone package itself is NOT on PyPI.
+#       In Docker it is installed from the cloned GitHub repo in the builder
+#       stage (see Dockerfile.gpu).
+#
+# numpy must stay <2 — binary compatibility with torch 2.2.2
 numpy==1.26.4
 
-# PyTorch with CUDA 12.1 support
+# ── PyTorch + torchaudio (CUDA 12.1) ─────────────────────────────────────────
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch==2.2.2+cu121
+torchaudio==2.2.2+cu121
 
-# ONNX Runtime with CUDA 12.x support
-# (requires the NVIDIA Container Toolkit on the host)
+# ── HuggingFace transformers ──────────────────────────────────────────────────
+# Must stay <5.0 — transformers 5.x requires PyTorch >= 2.4
+transformers>=4.30.0,<5.0.0
+
+# ── tone package dependencies ─────────────────────────────────────────────────
+# onnxruntime-gpu: imported at module level by tone/onnx_wrapper.py.
+# Requires the NVIDIA Container Toolkit on the host.
 onnxruntime-gpu==1.18.1
 
-# Web framework
+# pyctcdecode + kenlm: CTC beam-search decoder.
+# kenlm requires cmake + g++ at build time (provided in the Docker builder stage).
+pyctcdecode>=0.2.0,<1.0.0
+kenlm>=0.2.0,<1.0.0
+
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi==0.136.1
 uvicorn[standard]==0.47.0
 starlette==1.0.1
@@ -18,17 +34,21 @@ httpx==0.28.1
 anyio==4.13.0
 python-multipart==0.0.20
 
-# Model download
+# ── Model download ────────────────────────────────────────────────────────────
 huggingface_hub==1.16.1
 
-# Audio I/O & resampling
+# ── Audio I/O & resampling ────────────────────────────────────────────────────
 librosa==0.11.0
 soundfile==0.13.1
 scipy==1.17.1
 
-# Preprocessing
+# ── Preprocessing ─────────────────────────────────────────────────────────────
 webrtcvad==2.0.10
 noisereduce==3.0.3
 
-# Test client
+# ── Test client ───────────────────────────────────────────────────────────────
 websockets==16.0
+
+# ── Benchmark script (benchmark.py) ──────────────────────────────────────────
+datasets==4.8.5
+tqdm==4.67.3

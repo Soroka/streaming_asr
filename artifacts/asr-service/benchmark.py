@@ -68,8 +68,12 @@ from datasets import load_dataset, Audio
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 DATASET_ID   = "bond005/sberdevices_golos_100h_farfield"
-SAMPLE_RATE  = 16_000
-CHUNK_SAMPLES = 2_400   # 150 ms — matches model's native chunk size
+# Audio is sent to the ASR service at 16 kHz (the service resamples to 8 kHz
+# internally before feeding the model).
+SAMPLE_RATE   = 16_000
+# Client-side WebSocket chunk size in samples @ 16 kHz = 150 ms per send.
+# The server buffers these and processes in 300 ms chunks (2400 samples @ 8 kHz).
+CHUNK_SAMPLES = 2_400
 
 log = logging.getLogger("benchmark")
 

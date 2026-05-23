@@ -24,7 +24,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Persist the ~250 MB ONNX model so it is not re-downloaded on restart
+      # Persist model weights + KenLM binary (~6 GB total) across restarts
       - model-cache:/cache
     environment:
       # Optional: set HF_TOKEN in your shell or a .env file to bypass HF rate limits
@@ -36,8 +36,8 @@ services:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      start_period: 90s
-      retries: 5
+      start_period: 180s
+      retries: 6
     logging:
       driver: json-file
       options:
@@ -72,8 +72,8 @@ services:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      start_period: 90s
-      retries: 5
+      start_period: 180s
+      retries: 6
     logging:
       driver: json-file
       options:

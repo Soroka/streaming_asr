@@ -257,7 +257,11 @@ class StreamingSession:
         self._model         = model
         self._pipeline_state: tuple | None = None   # (model_state, splitter_state)
         self._splitter      = StreamingLogprobSplitter()
-        self._pcm_buffer    = np.array([], dtype=np.int32)
+        # Pre-fill the buffer with PADDING samples of silence so that the phrase
+        # splitter sees a leading silence boundary before any speech.  This mirrors
+        # StreamingCTCPipeline.forward_offline()'s behaviour of padding the head of
+        # every utterance, and prevents systematic first-word clipping.
+        self._pcm_buffer    = np.zeros(PADDING, dtype=np.int32)
         self._all_phrases:  list[_Phrase] = []
 
         # Client-side sample rate (may differ from SAMPLE_RATE=8000)
@@ -290,7 +294,10 @@ class StreamingSession:
     ) -> None:
         self._client_sr = sample_rate
         self._reference = reference
-        self.metrics.sample_rate = sample_rate
+        # All internal audio counting happens at the model's native 8 kHz rate
+        # (samples are counted after resampling), so RTF/duration calculations
+        # must use SAMPLE_RATE regardless of what the client sends.
+        self.metrics.sample_rate = SAMPLE_RATE
 
         if preprocessing is not None:
             cfg = PreprocessorConfig.from_dict(preprocessing)
